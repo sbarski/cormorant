@@ -11,8 +11,8 @@ namespace Cormorant.App.Model
         public Region()
         {
             this.MapsToTable("Region");
-            this.MapsToField(() => Id, "RegionID");
-            this.MapsToField(() => RegionDescription, "RegionDescription");
+            this.MapsToField(() => Id, databasePropertyName:"RegionID", isPrimaryKey:true);
+            this.MapsToField(() => RegionDescription, databasePropertyName:"RegionDescription");
         }
 
         public int Id { get; set; }

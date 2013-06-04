@@ -68,14 +68,17 @@ namespace Cormorant
 
             return canConnectToDatabase;
         }
+
+
     }
 
     public static class DatabaseModelHelper
     {
-        private static List<Tuple<string, string, string>> _nameMappings; //object fully qualified (name), from model (name), to database (name)
-        private static Dictionary<string, string> _tableMappings; //object fully qualified (name) to database (name)
+        private static List<Tuple<string, string, string>> _nameMappings = new List<Tuple<string, string, string>>(); //object fully qualified (name), from model (name), to database (name)
+        private static Dictionary<string, string> _tableMappings = new Dictionary<string, string>(); //object fully qualified (name) to database (name)
+        private static List<string> _primaryKeyMappings = new List<string>(); //fully qualified name 
 
-        public static IEnumerable GetAll<T>(this T databaseModel) where T: IDatabaseModel
+        public static IEnumerable<T> GetAll<T>(this T databaseModel) where T: IDatabaseModel
         {
             if (string.IsNullOrEmpty(Database.ConnectionString))
             {
@@ -96,7 +99,7 @@ namespace Cormorant
                 {
                     while (result.Read())
                     {
-                        var model = result.ConvertTo<T>(databaseModel, GetFieldNameMappings(databaseModel));
+                        var model = result.ConvertDataToModel<T>(databaseModel, GetFieldNameMappings(databaseModel));
 
                         yield return model;
                     }
@@ -104,7 +107,7 @@ namespace Cormorant
             }
         }
 
-        public static void Save<T>(this T databaseModel) where T : IDatabaseModel
+        public static void Update<T>(this T databaseModel, string transactionName = "") where T : IDatabaseModel
         {
             if (string.IsNullOrEmpty(Database.ConnectionString))
             {
@@ -113,13 +116,55 @@ namespace Cormorant
 
             using (var connection = new SqlConnection(Database.ConnectionString))
             {
-                connection.Open();
-
                 var tableName = GetTableName(databaseModel);
 
-                //var sqlExpression = string.Format()
+                var setStatements = GenerateSetMethod(databaseModel);
 
+                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName, setStatements);
+
+                connection.Open();
+
+                using (var tx = connection.BeginTransaction(transactionName))
+                {
+                    try
+                    {
+                        var command = new SqlCommand(updateStatement, connection, tx);
+
+                        command.ExecuteNonQuery();
+
+                        tx.Commit();
+                    }
+                    catch (SqlException e)
+                    {
+                        tx.Rollback();
+                    }
+                }
+
+                connection.Close();
             }
+        }
+
+        private static string GenerateSetMethod<T>(T databaseModel) where T : IDatabaseModel
+        {
+            var setMethods = new StringBuilder();
+            var fieldMappings = _nameMappings.Where(x => string.Equals(x.Item1, databaseModel.GetType().FullName))
+                                             .ToDictionary(m => m.Item2, n => n.Item3);
+
+            var propertiesToUpdate = databaseModel.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public);
+
+            foreach (var field in propertiesToUpdate)
+            {
+                var dbFieldName = field.Name;
+
+                if (fieldMappings.ContainsKey(field.Name))
+                {
+                    dbFieldName = fieldMappings.SingleOrDefault(m => string.Equals(m.Key, dbFieldName)).Value;
+                }
+
+                setMethods.Append(string.Format(SqlExpressions.SetClause + " ", dbFieldName, field.GetValue(databaseModel)));
+            }
+
+            return setMethods.ToString();
         }
 
         private static Dictionary<string, string> GetFieldNameMappings(IDatabaseModel databaseModel)
@@ -143,15 +188,8 @@ namespace Cormorant
             return databaseModel.GetType().Name;
         }
 
-        public static IDatabaseModel MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName) 
+        public static IDatabaseModel MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false) 
         {
-            if (_nameMappings == null)
-            {
-                _nameMappings = new List<Tuple<string, string, string>>();
-            }
-
-
-
             var propertyName = (property.Body as MemberExpression ?? ((UnaryExpression)property.Body).Operand as MemberExpression).Member.Name;
 
             var tuple = new Tuple<string, string, string>(databaseModel.GetType().FullName, propertyName, databasePropertyName);
@@ -161,6 +199,12 @@ namespace Cormorant
                 return databaseModel;
             }
 
+            var fullPropertyName = string.Format("{0}.{1}", databaseModel.GetType().FullName, propertyName);
+            if (isPrimaryKey && !_primaryKeyMappings.Contains(fullPropertyName))
+            {
+                _primaryKeyMappings.Add(fullPropertyName);
+            }
+
             _nameMappings.Add(tuple);
             
             return databaseModel;
@@ -168,11 +212,6 @@ namespace Cormorant
 
         public static IDatabaseModel MapsToTable(this IDatabaseModel databaseModel, string databaseName)
         {
-            if (_tableMappings == null)
-            {
-                _tableMappings = new Dictionary<string, string>();
-            }
-
             if (!_tableMappings.ContainsKey(databaseModel.GetType().FullName) && !_tableMappings.ContainsValue(databaseName))
             {
                 _tableMappings.Add(databaseModel.GetType().FullName, databaseName);
@@ -184,7 +223,7 @@ namespace Cormorant
 
     internal static class ConversionHelper
     {
-        public static object ConvertTo<T>(this IDataReader dataReader, IDatabaseModel databaseModel, Dictionary<string, string> nameMappings) where T: IDatabaseModel
+        public static T ConvertDataToModel<T>(this IDataReader dataReader, IDatabaseModel databaseModel, Dictionary<string, string> nameMappings) where T: IDatabaseModel
         {
             var model = Activator.CreateInstance<T>();
 
@@ -220,6 +259,8 @@ namespace Cormorant
     {
         public static string WhereClause { get { return "SELECT * FROM {0}"; } }
 
-        public static string UpdateClause { get { return "UPDATE {0} SET {1} WHERE {2} = @{3}"; } }
+        public static string UpdateClause { get { return "UPDATE {0} {1}"; } }
+
+        public static string SetClause { get { return "SET {0} = {1}"; } }
     }
 }
