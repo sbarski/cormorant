@@ -8,11 +8,18 @@ namespace Cormorant.App.Model
 {
     public class Region : IDatabaseModel
     {
+        public static bool hasInit = false;
+
         public Region()
         {
-            this.MapsToTable("Region");
-            this.MapsToField(() => Id, databasePropertyName:"RegionID", isPrimaryKey:true);
-            this.MapsToField(() => RegionDescription, databasePropertyName:"RegionDescription");
+            if (!hasInit)
+            {
+                this.MapsToTable(databaseName: "Region");
+                this.MapsToField(() => Id, databasePropertyName: "RegionID").IsPrimaryKey();
+                this.MapsToField(() => RegionDescription, databasePropertyName: "RegionDescription");
+
+                hasInit = true;
+            }
         }
 
         public int Id { get; set; }

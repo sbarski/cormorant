@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Configuration;
 using System.Data;
 using System.Data.Common;
@@ -16,6 +17,19 @@ namespace Cormorant
     public interface IDatabaseModel
     {
 
+    }
+
+    public class DatabaseProperty
+    {
+        public DatabaseProperty(string fullAssemblyName, string fullPropertyName)
+        {
+            FullAssemblyName = fullAssemblyName;
+            PropertyName = fullPropertyName;
+        }
+
+        protected internal string FullAssemblyName { get; private set; }
+
+        protected internal string PropertyName { get; private set; }
     }
 
     public class Database
@@ -68,15 +82,13 @@ namespace Cormorant
 
             return canConnectToDatabase;
         }
-
-
     }
 
     public static class DatabaseModelHelper
     {
         private static List<Tuple<string, string, string>> _nameMappings = new List<Tuple<string, string, string>>(); //object fully qualified (name), from model (name), to database (name)
         private static Dictionary<string, string> _tableMappings = new Dictionary<string, string>(); //object fully qualified (name) to database (name)
-        private static List<string> _primaryKeyMappings = new List<string>(); //fully qualified name 
+        private static Dictionary<string, string> _primaryKeyMappings = new Dictionary<string, string>(); //object fully qualifiedname, database (name) 
 
         public static IEnumerable<T> GetAll<T>(this T databaseModel) where T: IDatabaseModel
         {
@@ -91,7 +103,7 @@ namespace Cormorant
 
                 var tableName = GetTableName(databaseModel);
 
-                var sqlExpression = string.Format(SqlExpressions.WhereClause, tableName);
+                var sqlExpression = string.Format(SqlExpressions.SelectClause, tableName);
 
                 var command = new SqlCommand(sqlExpression, connection);
 
@@ -118,9 +130,7 @@ namespace Cormorant
             {
                 var tableName = GetTableName(databaseModel);
 
-                var setStatements = GenerateSetMethod(databaseModel);
-
-                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName, setStatements);
+                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName);
 
                 connection.Open();
 
@@ -128,7 +138,13 @@ namespace Cormorant
                 {
                     try
                     {
-                        var command = new SqlCommand(updateStatement, connection, tx);
+                        string sqlSetStatement;
+                        var parameters = GenerateSetMethod(databaseModel, out sqlSetStatement);
+
+                        var sql = string.Format("{0} {1}", updateStatement, sqlSetStatement);
+
+                        var command = new SqlCommand(sql, connection, tx);
+                        command.Parameters.AddRange(parameters);
 
                         command.ExecuteNonQuery();
 
@@ -144,27 +160,71 @@ namespace Cormorant
             }
         }
 
-        private static string GenerateSetMethod<T>(T databaseModel) where T : IDatabaseModel
+
+
+        /// <summary>
+        /// Generates set methods based on the CLR model 
+        /// </summary>x
+        private static SqlParameter[] GenerateSetMethod<T>(T databaseModel, out string sql) where T : IDatabaseModel
         {
-            var setMethods = new StringBuilder();
+            var sqlBuilder = new List<string>();
+
+            var parameters = new List<SqlParameter>();
+
             var fieldMappings = _nameMappings.Where(x => string.Equals(x.Item1, databaseModel.GetType().FullName))
                                              .ToDictionary(m => m.Item2, n => n.Item3);
 
-            var propertiesToUpdate = databaseModel.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public);
+            var primaryKeyName = GetPrimaryKey(databaseModel);
 
-            foreach (var field in propertiesToUpdate)
+            var propertiesToUpdate = databaseModel
+                    .GetType()
+                    .GetProperties(BindingFlags.Instance | BindingFlags.Public);
+
+            foreach (var property in propertiesToUpdate)
             {
-                var dbFieldName = field.Name;
+                var dbFieldName = property.Name;
 
-                if (fieldMappings.ContainsKey(field.Name))
+                if (fieldMappings.ContainsKey(property.Name))
                 {
                     dbFieldName = fieldMappings.SingleOrDefault(m => string.Equals(m.Key, dbFieldName)).Value;
                 }
 
-                setMethods.Append(string.Format(SqlExpressions.SetClause + " ", dbFieldName, field.GetValue(databaseModel)));
+                object propertyValue = property.GetValue(databaseModel);
+                var parameter = new SqlParameter(string.Format("@{0}", dbFieldName), propertyValue);
+
+                parameters.Add(parameter);
+
+                //if the primary key was empty then try to guess what it could be
+                if (string.IsNullOrEmpty(primaryKeyName) && (string.Equals(property.Name, "Id", StringComparison.InvariantCulture) || property.Name.EndsWith("Id", StringComparison.InvariantCulture)))
+                {
+                    primaryKeyName = dbFieldName;
+                }
+
+                if (!string.Equals(dbFieldName, primaryKeyName))
+                {
+                    sqlBuilder.Add(string.Format(SqlExpressions.SetClause, dbFieldName, dbFieldName));
+                }
             }
 
-            return setMethods.ToString();
+
+            var where = string.Format(SqlExpressions.WhereClause, primaryKeyName, primaryKeyName);
+            sql = string.Format("SET {0} {1}", string.Join(", ", sqlBuilder), where);
+
+            return parameters.ToArray();
+        }
+
+        private static string GetPrimaryKey(IDatabaseModel databaseModel)
+        {
+            var fullyQualifiedName = databaseModel.GetType().FullName;
+
+            if (_primaryKeyMappings.ContainsKey(fullyQualifiedName))
+            {
+                var modelPrimaryKey = _primaryKeyMappings[fullyQualifiedName];
+
+                return modelPrimaryKey;
+            }
+
+            return null;
         }
 
         private static Dictionary<string, string> GetFieldNameMappings(IDatabaseModel databaseModel)
@@ -188,36 +248,50 @@ namespace Cormorant
             return databaseModel.GetType().Name;
         }
 
-        public static IDatabaseModel MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false) 
+        public static DatabaseProperty MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false) 
         {
             var propertyName = (property.Body as MemberExpression ?? ((UnaryExpression)property.Body).Operand as MemberExpression).Member.Name;
 
-            var tuple = new Tuple<string, string, string>(databaseModel.GetType().FullName, propertyName, databasePropertyName);
+            var fullName = databaseModel.GetType().FullName;
+
+            var tuple = new Tuple<string, string, string>(fullName, propertyName, databasePropertyName);
 
             if (_nameMappings.Contains(tuple))
             {
-                return databaseModel;
+                return new DatabaseProperty(fullName, propertyName);
             }
 
-            var fullPropertyName = string.Format("{0}.{1}", databaseModel.GetType().FullName, propertyName);
-            if (isPrimaryKey && !_primaryKeyMappings.Contains(fullPropertyName))
+            if (isPrimaryKey && !_primaryKeyMappings.ContainsKey(fullName))
             {
-                _primaryKeyMappings.Add(fullPropertyName);
+                _primaryKeyMappings.Add(fullName, databasePropertyName);
             }
 
             _nameMappings.Add(tuple);
-            
-            return databaseModel;
+
+            return new DatabaseProperty(fullName, propertyName);
         }
 
-        public static IDatabaseModel MapsToTable(this IDatabaseModel databaseModel, string databaseName)
+        /// <summary>
+        /// The CLR List Type guarantees ordering so the last inserted
+        /// </summary>
+        public static DatabaseProperty IsPrimaryKey(this DatabaseProperty propertyModel) 
+        {
+            var property = _nameMappings.FirstOrDefault(m => string.Equals(propertyModel.FullAssemblyName, m.Item1) && string.Equals(propertyModel.PropertyName, m.Item2));
+
+            if (property != null && !_primaryKeyMappings.ContainsKey(property.Item1))
+            {
+                _primaryKeyMappings.Add(property.Item1, property.Item3);
+            }
+
+            return propertyModel;
+        }
+
+        public static void MapsToTable(this IDatabaseModel databaseModel, string databaseName)
         {
             if (!_tableMappings.ContainsKey(databaseModel.GetType().FullName) && !_tableMappings.ContainsValue(databaseName))
             {
                 _tableMappings.Add(databaseModel.GetType().FullName, databaseName);
             }
-
-            return databaseModel;
         }
     }
 
@@ -253,14 +327,34 @@ namespace Cormorant
 
             return model;
         }
+
+        public static SqlDbType ConvertToDbType(Type type)
+        {
+            var param = new SqlParameter();
+
+            var tc = TypeDescriptor.GetConverter(param.DbType);
+
+            try
+            {
+                param.DbType = (DbType) tc.ConvertFrom(type.Name);
+            }
+            catch (Exception e)
+            {
+                throw e;
+            }
+
+            return param.SqlDbType;
+        }
     }
 
     static class SqlExpressions
     {
-        public static string WhereClause { get { return "SELECT * FROM {0}"; } }
+        public static string SelectClause { get { return "SELECT * FROM {0}"; } }
 
-        public static string UpdateClause { get { return "UPDATE {0} {1}"; } }
+        public static string UpdateClause { get { return "UPDATE {0}"; } }
 
-        public static string SetClause { get { return "SET {0} = {1}"; } }
+        public static string SetClause { get { return "[{0}] = @{1}"; } }
+
+        public static string WhereClause { get { return "WHERE [{0}] = @{1}"; } }
     }
 }

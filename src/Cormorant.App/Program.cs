@@ -26,7 +26,7 @@ namespace Cormorant.App
 
             var updR = region3.FirstOrDefault();
                 
-            updR.RegionDescription = "Peter";
+            updR.RegionDescription = "Peter2";
 
             updR.Update();
         }
