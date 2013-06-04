@@ -327,24 +327,6 @@ namespace Cormorant
 
             return model;
         }
-
-        public static SqlDbType ConvertToDbType(Type type)
-        {
-            var param = new SqlParameter();
-
-            var tc = TypeDescriptor.GetConverter(param.DbType);
-
-            try
-            {
-                param.DbType = (DbType) tc.ConvertFrom(type.Name);
-            }
-            catch (Exception e)
-            {
-                throw e;
-            }
-
-            return param.SqlDbType;
-        }
     }
 
     static class SqlExpressions
