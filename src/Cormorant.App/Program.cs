@@ -29,6 +29,10 @@ namespace Cormorant.App
             updR.RegionDescription = "Peter2";
 
             updR.Update();
+
+            var r4 = new Region();
+
+            r4.Insert("blah");
         }
     }
 }

@@ -15,7 +15,7 @@ namespace Cormorant.App.Model
             if (!hasInit)
             {
                 this.MapsToTable(databaseName: "Region");
-                this.MapsToField(() => Id, databasePropertyName: "RegionID").IsPrimaryKey();
+                this.MapsToField(() => Id, databasePropertyName: "RegionID", isPrimaryKey: true);
                 this.MapsToField(() => RegionDescription, databasePropertyName: "RegionDescription");
 
                 hasInit = true;

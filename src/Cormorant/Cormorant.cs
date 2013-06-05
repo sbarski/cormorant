@@ -19,19 +19,6 @@ namespace Cormorant
 
     }
 
-    public class DatabaseProperty
-    {
-        public DatabaseProperty(string fullAssemblyName, string fullPropertyName)
-        {
-            FullAssemblyName = fullAssemblyName;
-            PropertyName = fullPropertyName;
-        }
-
-        protected internal string FullAssemblyName { get; private set; }
-
-        protected internal string PropertyName { get; private set; }
-    }
-
     public class Database
     {
         public static string ConnectionString { get; private set; }
@@ -88,7 +75,8 @@ namespace Cormorant
     {
         private static List<Tuple<string, string, string>> _nameMappings = new List<Tuple<string, string, string>>(); //object fully qualified (name), from model (name), to database (name)
         private static Dictionary<string, string> _tableMappings = new Dictionary<string, string>(); //object fully qualified (name) to database (name)
-        private static Dictionary<string, string> _primaryKeyMappings = new Dictionary<string, string>(); //object fully qualifiedname, database (name) 
+        private static Dictionary<string, string> _primaryKeyMappings = new Dictionary<string, string>(); //object fully qualified name, database (name) 
+        private static Dictionary<string, string> _rowVersionMappings = new Dictionary<string, string>(); //object fully qualified name, database (name) 
 
         public static IEnumerable<T> GetAll<T>(this T databaseModel) where T: IDatabaseModel
         {
@@ -160,7 +148,46 @@ namespace Cormorant
             }
         }
 
+        public static void Insert<T>(this T databaseModel, string transactionName = "") where T : IDatabaseModel
+        {
+            if (string.IsNullOrEmpty(Database.ConnectionString))
+            {
+                throw new NoNullAllowedException("The connection string is null or empty");
+            }
 
+            using (var connection = new SqlConnection(Database.ConnectionString))
+            {
+                var tableName = GetTableName(databaseModel);
+
+                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName);
+
+                connection.Open();
+
+                using (var tx = connection.BeginTransaction(transactionName))
+                {
+                    try
+                    {
+                        string sqlSetStatement;
+                        var parameters = GenerateSetMethod(databaseModel, out sqlSetStatement);
+
+                        var sql = string.Format("{0} {1}", updateStatement, sqlSetStatement);
+
+                        var command = new SqlCommand(sql, connection, tx);
+                        command.Parameters.AddRange(parameters);
+
+                        command.ExecuteNonQuery();
+
+                        tx.Commit();
+                    }
+                    catch (SqlException e)
+                    {
+                        tx.Rollback();
+                    }
+                }
+
+                connection.Close();
+            }
+        }
 
         /// <summary>
         /// Generates set methods based on the CLR model 
@@ -174,7 +201,11 @@ namespace Cormorant
             var fieldMappings = _nameMappings.Where(x => string.Equals(x.Item1, databaseModel.GetType().FullName))
                                              .ToDictionary(m => m.Item2, n => n.Item3);
 
-            var primaryKeyName = GetPrimaryKey(databaseModel);
+            var fullName = databaseModel.GetType().FullName;
+
+            var primaryKeyName = GetPrimaryKey(fullName);
+
+            var rowVersion = GetRowVersion(fullName);
 
             var propertiesToUpdate = databaseModel
                     .GetType()
@@ -206,20 +237,41 @@ namespace Cormorant
                 }
             }
 
+            if (string.IsNullOrEmpty(primaryKeyName))
+            {
+                throw new ConfigurationErrorsException(string.Format("Primary key not defined, not found or misconfigured for: {0}", databaseModel.GetType().FullName));
+            }
 
             var where = string.Format(SqlExpressions.WhereClause, primaryKeyName, primaryKeyName);
+
+            if (!string.IsNullOrEmpty(rowVersion))
+            {
+                where = string.Format("{0} AND [{1}] = @{2}", where, rowVersion, rowVersion);
+            }
+
+
             sql = string.Format("SET {0} {1}", string.Join(", ", sqlBuilder), where);
 
             return parameters.ToArray();
         }
 
-        private static string GetPrimaryKey(IDatabaseModel databaseModel)
+        public static string GetRowVersion(string fullName)
         {
-            var fullyQualifiedName = databaseModel.GetType().FullName;
-
-            if (_primaryKeyMappings.ContainsKey(fullyQualifiedName))
+            if (_rowVersionMappings.ContainsKey(fullName))
             {
-                var modelPrimaryKey = _primaryKeyMappings[fullyQualifiedName];
+                var rowVersion = _rowVersionMappings[fullName];
+
+                return rowVersion;
+            }
+
+            return null;
+        }
+
+        private static string GetPrimaryKey(string fullName)
+        {
+            if (_primaryKeyMappings.ContainsKey(fullName))
+            {
+                var modelPrimaryKey = _primaryKeyMappings[fullName];
 
                 return modelPrimaryKey;
             }
@@ -248,44 +300,37 @@ namespace Cormorant
             return databaseModel.GetType().Name;
         }
 
-        public static DatabaseProperty MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false) 
+        public static void MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false, bool isRowVersion = false) 
         {
+            if (isRowVersion && isPrimaryKey)
+            {
+                throw new ConfigurationErrorsException(string.Format("Primary Key and Row Version cannot be true for the same property for: {0}", databaseModel.GetType().FullName));
+            }
+
             var propertyName = (property.Body as MemberExpression ?? ((UnaryExpression)property.Body).Operand as MemberExpression).Member.Name;
 
             var fullName = databaseModel.GetType().FullName;
 
-            var tuple = new Tuple<string, string, string>(fullName, propertyName, databasePropertyName);
-
-            if (_nameMappings.Contains(tuple))
+            if (_nameMappings.Any(m => string.Equals(m.Item1, fullName)))
             {
-                return new DatabaseProperty(fullName, propertyName);
+                return;
             }
+
+            var tuple = new Tuple<string, string, string>(fullName, propertyName, databasePropertyName);
 
             if (isPrimaryKey && !_primaryKeyMappings.ContainsKey(fullName))
             {
                 _primaryKeyMappings.Add(fullName, databasePropertyName);
             }
 
-            _nameMappings.Add(tuple);
-
-            return new DatabaseProperty(fullName, propertyName);
-        }
-
-        /// <summary>
-        /// The CLR List Type guarantees ordering so the last inserted
-        /// </summary>
-        public static DatabaseProperty IsPrimaryKey(this DatabaseProperty propertyModel) 
-        {
-            var property = _nameMappings.FirstOrDefault(m => string.Equals(propertyModel.FullAssemblyName, m.Item1) && string.Equals(propertyModel.PropertyName, m.Item2));
-
-            if (property != null && !_primaryKeyMappings.ContainsKey(property.Item1))
+            if (isRowVersion && !_rowVersionMappings.ContainsKey(fullName))
             {
-                _primaryKeyMappings.Add(property.Item1, property.Item3);
+                _rowVersionMappings.Add(fullName, databasePropertyName);
             }
 
-            return propertyModel;
+            _nameMappings.Add(tuple);
         }
-
+        
         public static void MapsToTable(this IDatabaseModel databaseModel, string databaseName)
         {
             if (!_tableMappings.ContainsKey(databaseModel.GetType().FullName) && !_tableMappings.ContainsValue(databaseName))
@@ -329,14 +374,31 @@ namespace Cormorant
         }
     }
 
-    static class SqlExpressions
+    internal static class SqlExpressions
     {
-        public static string SelectClause { get { return "SELECT * FROM {0}"; } }
+        public static string SelectClause
+        {
+            get { return "SELECT * FROM {0}"; }
+        }
 
-        public static string UpdateClause { get { return "UPDATE {0}"; } }
+        public static string UpdateClause
+        {
+            get { return "UPDATE {0}"; }
+        }
 
-        public static string SetClause { get { return "[{0}] = @{1}"; } }
+        public static string SetClause
+        {
+            get { return "[{0}] = @{1}"; }
+        }
 
-        public static string WhereClause { get { return "WHERE [{0}] = @{1}"; } }
-    }
+        public static string WhereClause
+        {
+            get { return "WHERE [{0}] = @{1}"; }
+        }
+
+        public static string InsertClause
+        {
+            get { return "INSERT INTO {0}"; }
+        }
+    };
 }
