@@ -13,26 +13,26 @@ namespace Cormorant.App
         {
             var db = new Database("(local)", string.Empty, string.Empty, "Northwind");
 
-            Console.WriteLine(db.CanConnectToDatabase());
+            //Console.WriteLine(db.CanConnectToDatabase());
 
-            var shippers = new Shippers().GetAll();
+            //var shippers = new Shippers().GetAll();
 
-            foreach (var shipperse in shippers)
-            {
-                Console.WriteLine(shipperse.Phone);
-            }
+            //foreach (var shipperse in shippers)
+            //{
+            //    Console.WriteLine(shipperse.Phone);
+            //}
 
-            var ship1 = shippers.FirstOrDefault();
+            //var ship1 = shippers.FirstOrDefault();
 
-            ship1.CompanyName = "Peter";
+            //ship1.CompanyName = "Peter";
 
-            ship1.Update("Transact");
+            //ship1.Update("Transact");
 
-            var ship = new Shippers() {CompanyName = "Appfail", Phone = "2323242"};
+            //var ship = new Shippers() {CompanyName = "Appfail", Phone = "2323242"};
 
-            ship.Insert("Transact Shipper");
+            //ship.Insert("Transact Shipper");
 
-            var peter = new Peter() {Comment = "Blah"};
+            var peter = new Peter() {};
 
             peter.Insert("blah");
 

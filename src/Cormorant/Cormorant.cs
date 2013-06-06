@@ -207,39 +207,36 @@ namespace Cormorant
                             throw new ConfigurationErrorsException(string.Format("A primary key was not defined for type: {0}", databaseModel.GetType().FullName));
                         }
 
-                        var parameters = GenerateSetMethod(databaseModel);
-                                
-                        var pk = parameters.Single(m => string.Equals(m.ParameterName, "@" + primaryKey.DbName));
+                        var parameters = GenerateSetMethod(databaseModel)
+                            .Where(m => !string.Equals(m.ParameterName, "@" + primaryKey.DbName)).ToArray();
 
+                        var primaryKeyName = string.Empty;
+                        var primaryKeyGenerationStrategy = string.Empty;
+                                
                         switch (primaryKey.PKGenerationStrategy)
                         {
-                            //Remove the PK/Identity Parameter altogether
-                            case PKGenerationStrategy.Identity:
-                                parameters = parameters.Except(new[] {pk}).ToArray();
-                                break;
-
                             case PKGenerationStrategy.NewGuid:
-                                pk.Value = "NEWID()";
-                                pk.SqlDbType = SqlDbType.UniqueIdentifier;
+                                primaryKeyName = parameters.Length > 0 ? string.Concat(", ", primaryKey.DbName) : primaryKey.DbName;
+                                primaryKeyGenerationStrategy = parameters.Length > 0 ? string.Concat(", ", "NEWID()") : "NEWID()";
                                 break;
 
                             case PKGenerationStrategy.SequentialGuid:
-                                pk.Value = "NEWSEQUENTIALID()";
-                                pk.SqlDbType = SqlDbType.UniqueIdentifier;
+                                primaryKeyName = parameters.Length > 0 ? string.Concat(", ", primaryKey.DbName) : primaryKey.DbName;
+                                primaryKeyGenerationStrategy = parameters.Length > 0 ? string.Concat(", ", "NEWSEQUENTIALID()") : "N";
                                 break;
 
                         }
 
                         var sqlStatement = string.Format("INSERT INTO {0} ({1}) VALUES ({2})", 
-                            tableName, 
-                            string.Join(", ", parameters.Select(m => m.ParameterName.TrimStart(new []{'@'}))), 
-                            string.Join(", ", parameters.Select(m => m.ParameterName)));
+                            tableName,
+                            string.Join(", ", parameters.Select(m => m.ParameterName.TrimStart(new[] { '@' }))) + primaryKeyName, 
+                            string.Join(", ", parameters.Select(m => m.ParameterName)) + primaryKeyGenerationStrategy);
 
                         var command = new SqlCommand(sqlStatement, connection, tx);
                         
                         command.Parameters.AddRange(parameters);
 
-                        command.ExecuteNonQuery();
+                        var id = (object)command.ExecuteScalar();
 
                         tx.Commit();
                     }
@@ -258,8 +255,6 @@ namespace Cormorant
         /// </summary>x
         private static SqlParameter[] GenerateSetMethod<T>(T databaseModel) where T : IDatabaseModel
         {
-            var sqlBuilder = new List<string>();
-
             var parameters = new List<SqlParameter>();
 
             var fieldMappings = _nameMappings.Where(x => string.Equals(x.Assembly, databaseModel.GetType().FullName))

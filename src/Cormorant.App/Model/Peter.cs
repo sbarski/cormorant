@@ -15,14 +15,14 @@ namespace Cormorant.App.Model
             if (!hasInit)
             {
                 this.MapsToTable(databaseName: "Peter");
-                this.MapsToField(() => Id, databasePropertyName: "PeterId").IsPrimaryKey(PKGenerationStrategy.SequentialGuid);
-                this.MapsToField(() => Comment, databasePropertyName: "Comment");
+                this.MapsToField(() => ColumnA, databasePropertyName: "ColumnA").IsPrimaryKey(PKGenerationStrategy.NewGuid);
+                //this.MapsToField(() => Comment, databasePropertyName: "Comment");
 
                 hasInit = true;
             }
         }
 
-        public Guid Id { get; set; }
-        public string Comment { get; set; }
+        public Guid ColumnA { get; set; }
+        
     }
 }
