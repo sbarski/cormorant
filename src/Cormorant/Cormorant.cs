@@ -19,6 +19,32 @@ namespace Cormorant
 
     }
 
+    public enum PKGenerationStrategy
+    {
+        Identity = 1,
+        SequentialGuid = 2,
+        NewGuid = 3
+    }
+
+    public class DatabaseField
+    {
+        public DatabaseField(string assembly, string clrName, string dbName)
+        {
+            Assembly = assembly;
+            CLRName = clrName;
+            DbName = dbName;
+            IsPrimaryKey = false;
+            IsRowVersion = false;
+        }
+
+        protected internal string Assembly { get; set; }
+        protected internal string CLRName { get; set; }
+        protected internal string DbName { get; set; }
+        protected internal bool IsPrimaryKey { get; set; }
+        protected internal bool IsRowVersion { get; set; }
+        protected internal PKGenerationStrategy PKGenerationStrategy { get; set; }
+    }
+
     public class Database
     {
         public static string ConnectionString { get; private set; }
@@ -73,10 +99,8 @@ namespace Cormorant
 
     public static class DatabaseModelHelper
     {
-        private static List<Tuple<string, string, string>> _nameMappings = new List<Tuple<string, string, string>>(); //object fully qualified (name), from model (name), to database (name)
+        private static List<DatabaseField> _nameMappings = new List<DatabaseField>(); //object fully qualified (name), from model (name), to database (name)
         private static Dictionary<string, string> _tableMappings = new Dictionary<string, string>(); //object fully qualified (name) to database (name)
-        private static Dictionary<string, string> _primaryKeyMappings = new Dictionary<string, string>(); //object fully qualified name, database (name) 
-        private static Dictionary<string, string> _rowVersionMappings = new Dictionary<string, string>(); //object fully qualified name, database (name) 
 
         public static IEnumerable<T> GetAll<T>(this T databaseModel) where T: IDatabaseModel
         {
@@ -91,6 +115,10 @@ namespace Cormorant
 
                 var tableName = GetTableName(databaseModel);
 
+                var mappings = _nameMappings
+                                    .Where(m => string.Equals(m.Assembly, databaseModel.GetType().FullName))
+                                    .ToDictionary(m => m.CLRName, n => n.DbName);
+
                 var sqlExpression = string.Format(SqlExpressions.SelectClause, tableName);
 
                 var command = new SqlCommand(sqlExpression, connection);
@@ -99,7 +127,7 @@ namespace Cormorant
                 {
                     while (result.Read())
                     {
-                        var model = result.ConvertDataToModel<T>(databaseModel, GetFieldNameMappings(databaseModel));
+                        var model = result.ConvertDataToModel<T>(databaseModel, mappings);
 
                         yield return model;
                     }
@@ -118,20 +146,27 @@ namespace Cormorant
             {
                 var tableName = GetTableName(databaseModel);
 
-                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName);
-
                 connection.Open();
 
                 using (var tx = connection.BeginTransaction(transactionName))
                 {
                     try
                     {
-                        string sqlSetStatement;
-                        var parameters = GenerateSetMethod(databaseModel, out sqlSetStatement);
+                        var primaryKey = GetPrimaryKey(databaseModel);
+                        
+                        if (primaryKey == null)
+                        {
+                            throw new ConfigurationErrorsException(string.Format("A primary key was not defined for type: {0}", databaseModel.GetType().FullName));
+                        }
 
-                        var sql = string.Format("{0} {1}", updateStatement, sqlSetStatement);
+                        var parameters = GenerateSetMethod(databaseModel);
 
-                        var command = new SqlCommand(sql, connection, tx);
+                        var sqlAssignment = string.Join(", ", parameters.Where(m => !string.Equals(m.ParameterName, "@" + primaryKey.DbName)).Select(param => string.Format(SqlExpressions.AssignClause, param.ParameterName.TrimStart(new []{'@'}), param)));
+
+                        var sqlStatement = string.Format("UPDATE {0} SET {1} WHERE [{2}] = @{2}", tableName, sqlAssignment, primaryKey.DbName);
+
+                        var command = new SqlCommand(sqlStatement, connection, tx);
+                        
                         command.Parameters.AddRange(parameters);
 
                         command.ExecuteNonQuery();
@@ -159,20 +194,49 @@ namespace Cormorant
             {
                 var tableName = GetTableName(databaseModel);
 
-                var updateStatement = string.Format(SqlExpressions.UpdateClause, tableName);
-
                 connection.Open();
 
                 using (var tx = connection.BeginTransaction(transactionName))
                 {
                     try
                     {
-                        string sqlSetStatement;
-                        var parameters = GenerateSetMethod(databaseModel, out sqlSetStatement);
+                        var primaryKey =  GetPrimaryKey(databaseModel);
 
-                        var sql = string.Format("{0} {1}", updateStatement, sqlSetStatement);
+                        if (primaryKey == null)
+                        {
+                            throw new ConfigurationErrorsException(string.Format("A primary key was not defined for type: {0}", databaseModel.GetType().FullName));
+                        }
 
-                        var command = new SqlCommand(sql, connection, tx);
+                        var parameters = GenerateSetMethod(databaseModel);
+                                
+                        var pk = parameters.Single(m => string.Equals(m.ParameterName, "@" + primaryKey.DbName));
+
+                        switch (primaryKey.PKGenerationStrategy)
+                        {
+                            //Remove the PK/Identity Parameter altogether
+                            case PKGenerationStrategy.Identity:
+                                parameters = parameters.Except(new[] {pk}).ToArray();
+                                break;
+
+                            case PKGenerationStrategy.NewGuid:
+                                pk.Value = "NEWID()";
+                                pk.SqlDbType = SqlDbType.UniqueIdentifier;
+                                break;
+
+                            case PKGenerationStrategy.SequentialGuid:
+                                pk.Value = "NEWSEQUENTIALID()";
+                                pk.SqlDbType = SqlDbType.UniqueIdentifier;
+                                break;
+
+                        }
+
+                        var sqlStatement = string.Format("INSERT INTO {0} ({1}) VALUES ({2})", 
+                            tableName, 
+                            string.Join(", ", parameters.Select(m => m.ParameterName.TrimStart(new []{'@'}))), 
+                            string.Join(", ", parameters.Select(m => m.ParameterName)));
+
+                        var command = new SqlCommand(sqlStatement, connection, tx);
+                        
                         command.Parameters.AddRange(parameters);
 
                         command.ExecuteNonQuery();
@@ -192,20 +256,14 @@ namespace Cormorant
         /// <summary>
         /// Generates set methods based on the CLR model 
         /// </summary>x
-        private static SqlParameter[] GenerateSetMethod<T>(T databaseModel, out string sql) where T : IDatabaseModel
+        private static SqlParameter[] GenerateSetMethod<T>(T databaseModel) where T : IDatabaseModel
         {
             var sqlBuilder = new List<string>();
 
             var parameters = new List<SqlParameter>();
 
-            var fieldMappings = _nameMappings.Where(x => string.Equals(x.Item1, databaseModel.GetType().FullName))
-                                             .ToDictionary(m => m.Item2, n => n.Item3);
-
-            var fullName = databaseModel.GetType().FullName;
-
-            var primaryKeyName = GetPrimaryKey(fullName);
-
-            var rowVersion = GetRowVersion(fullName);
+            var fieldMappings = _nameMappings.Where(x => string.Equals(x.Assembly, databaseModel.GetType().FullName))
+                                             .ToDictionary(m => m.CLRName, n => n.DbName);
 
             var propertiesToUpdate = databaseModel
                     .GetType()
@@ -224,68 +282,21 @@ namespace Cormorant
                 var parameter = new SqlParameter(string.Format("@{0}", dbFieldName), propertyValue);
 
                 parameters.Add(parameter);
-
-                //if the primary key was empty then try to guess what it could be
-                if (string.IsNullOrEmpty(primaryKeyName) && (string.Equals(property.Name, "Id", StringComparison.InvariantCulture) || property.Name.EndsWith("Id", StringComparison.InvariantCulture)))
-                {
-                    primaryKeyName = dbFieldName;
-                }
-
-                if (!string.Equals(dbFieldName, primaryKeyName))
-                {
-                    sqlBuilder.Add(string.Format(SqlExpressions.SetClause, dbFieldName, dbFieldName));
-                }
             }
-
-            if (string.IsNullOrEmpty(primaryKeyName))
-            {
-                throw new ConfigurationErrorsException(string.Format("Primary key not defined, not found or misconfigured for: {0}", databaseModel.GetType().FullName));
-            }
-
-            var where = string.Format(SqlExpressions.WhereClause, primaryKeyName, primaryKeyName);
-
-            if (!string.IsNullOrEmpty(rowVersion))
-            {
-                where = string.Format("{0} AND [{1}] = @{2}", where, rowVersion, rowVersion);
-            }
-
-
-            sql = string.Format("SET {0} {1}", string.Join(", ", sqlBuilder), where);
-
+            
             return parameters.ToArray();
         }
 
-        public static string GetRowVersion(string fullName)
+        private static DatabaseField GetPrimaryKey(IDatabaseModel databaseModel)
         {
-            if (_rowVersionMappings.ContainsKey(fullName))
-            {
-                var rowVersion = _rowVersionMappings[fullName];
+            var primaryKeyField = _nameMappings.FirstOrDefault(m => string.Equals(m.Assembly, databaseModel.GetType().FullName) && m.IsPrimaryKey);
 
-                return rowVersion;
+            if (primaryKeyField == null)
+            {
+                throw new ArgumentNullException("Could not find a mapping for type: {0}", databaseModel.GetType().FullName);
             }
 
-            return null;
-        }
-
-        private static string GetPrimaryKey(string fullName)
-        {
-            if (_primaryKeyMappings.ContainsKey(fullName))
-            {
-                var modelPrimaryKey = _primaryKeyMappings[fullName];
-
-                return modelPrimaryKey;
-            }
-
-            return null;
-        }
-
-        private static Dictionary<string, string> GetFieldNameMappings(IDatabaseModel databaseModel)
-        {
-            var nameMapping = _nameMappings
-                .Where(m => string.Equals(m.Item1, databaseModel.GetType().FullName))
-                .ToDictionary(c => c.Item2, k => k.Item3);
-
-            return nameMapping;
+            return primaryKeyField;
         }
 
         private static string GetTableName(IDatabaseModel databaseModel)
@@ -300,37 +311,49 @@ namespace Cormorant
             return databaseModel.GetType().Name;
         }
 
-        public static void MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName, bool isPrimaryKey = false, bool isRowVersion = false) 
+        public static DatabaseField IsPrimaryKey(this DatabaseField databaseField, PKGenerationStrategy pkGenerationStrategy)
         {
-            if (isRowVersion && isPrimaryKey)
+            if (databaseField.IsRowVersion)
             {
-                throw new ConfigurationErrorsException(string.Format("Primary Key and Row Version cannot be true for the same property for: {0}", databaseModel.GetType().FullName));
+                throw new ConfigurationErrorsException(string.Format("Primary Key and Row Version cannot be true for the same property for: {0}", databaseField.Assembly));
             }
 
+            databaseField.IsPrimaryKey = true;
+            databaseField.PKGenerationStrategy = pkGenerationStrategy;
+
+            return databaseField;
+        }
+
+        public static DatabaseField IsRowVersion(this DatabaseField databaseField)
+        {
+            if (databaseField.IsPrimaryKey)
+            {
+                throw new ConfigurationErrorsException(string.Format("Primary Key and Row Version cannot be true for the same property for: {0}", databaseField.Assembly));
+            }
+
+            databaseField.IsRowVersion = true;
+
+            return databaseField;
+        }
+
+        public static DatabaseField MapsToField(this IDatabaseModel databaseModel, Expression<Func<Object>> property, string databasePropertyName) 
+        {
             var propertyName = (property.Body as MemberExpression ?? ((UnaryExpression)property.Body).Operand as MemberExpression).Member.Name;
 
-            var fullName = databaseModel.GetType().FullName;
+            var field = _nameMappings.FirstOrDefault(m => string.Equals(m.Assembly, databaseModel.GetType().FullName) && string.Equals(m.CLRName, propertyName));
 
-            if (_nameMappings.Any(m => string.Equals(m.Item1, fullName)))
+            if (field != null)
             {
-                return;
+                return field;
             }
 
-            var tuple = new Tuple<string, string, string>(fullName, propertyName, databasePropertyName);
+            var dbField = new DatabaseField(databaseModel.GetType().FullName, propertyName, databasePropertyName);
 
-            if (isPrimaryKey && !_primaryKeyMappings.ContainsKey(fullName))
-            {
-                _primaryKeyMappings.Add(fullName, databasePropertyName);
-            }
+            _nameMappings.Add(dbField);
 
-            if (isRowVersion && !_rowVersionMappings.ContainsKey(fullName))
-            {
-                _rowVersionMappings.Add(fullName, databasePropertyName);
-            }
-
-            _nameMappings.Add(tuple);
+            return dbField;
         }
-        
+
         public static void MapsToTable(this IDatabaseModel databaseModel, string databaseName)
         {
             if (!_tableMappings.ContainsKey(databaseModel.GetType().FullName) && !_tableMappings.ContainsValue(databaseName))
@@ -381,24 +404,14 @@ namespace Cormorant
             get { return "SELECT * FROM {0}"; }
         }
 
-        public static string UpdateClause
+        public static string AssignClause
         {
-            get { return "UPDATE {0}"; }
-        }
-
-        public static string SetClause
-        {
-            get { return "[{0}] = @{1}"; }
+            get { return "[{0}] = {1}"; }
         }
 
         public static string WhereClause
         {
             get { return "WHERE [{0}] = @{1}"; }
-        }
-
-        public static string InsertClause
-        {
-            get { return "INSERT INTO {0}"; }
         }
     };
 }

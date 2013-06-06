@@ -15,24 +15,27 @@ namespace Cormorant.App
 
             Console.WriteLine(db.CanConnectToDatabase());
 
-            var region2 = new Region();
+            var shippers = new Shippers().GetAll();
 
-            var region3 = region2.GetAll();
-            
-            foreach (var region1 in region3)
+            foreach (var shipperse in shippers)
             {
-                Console.WriteLine(region1.Id);
+                Console.WriteLine(shipperse.Phone);
             }
 
-            var updR = region3.FirstOrDefault();
-                
-            updR.RegionDescription = "Peter2";
+            var ship1 = shippers.FirstOrDefault();
 
-            updR.Update();
+            ship1.CompanyName = "Peter";
 
-            var r4 = new Region();
+            ship1.Update("Transact");
 
-            r4.Insert("blah");
+            var ship = new Shippers() {CompanyName = "Appfail", Phone = "2323242"};
+
+            ship.Insert("Transact Shipper");
+
+            var peter = new Peter() {Comment = "Blah"};
+
+            peter.Insert("blah");
+
         }
     }
 }
